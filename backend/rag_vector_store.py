@@ -1,7 +1,5 @@
-"""
-RAG (Retrieval-Augmented Generation) & Vector Store Integration
-Enables semantic search and context retrieval for better LLM responses
-"""
+# RAG stuff - helps retrieve relevant context for better answers
+# Using vector embeddings to find similar documents/summaries
 
 import os
 from typing import List, Dict, Any, Optional
@@ -12,31 +10,24 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# VECTOR STORE ABSTRACTION
-# ============================================================================
-
+# Vector store interface - can swap between FAISS, ChromaDB, etc
 class VectorStore(ABC):
-    """Abstract vector store interface"""
     
     @abstractmethod
     def add_documents(self, documents: List[Dict[str, Any]]):
-        """Add documents with embeddings to store"""
         pass
     
     @abstractmethod
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar documents"""
         pass
     
     @abstractmethod
     def delete_all(self):
-        """Clear all documents"""
         pass
 
 
 class FAISSVectorStore(VectorStore):
-    """FAISS-based vector store (included in requirements)"""
+    # FAISS is fast and works locally - good for getting started
     
     def __init__(self, dimension: int = 384, index_path: Optional[str] = None):
         try:
@@ -47,21 +38,20 @@ class FAISSVectorStore(VectorStore):
             self.index_path = index_path
             self.documents = []
             
-            # Create or load FAISS index
+            # Load existing index if we have one
             if index_path and os.path.exists(index_path):
                 self.index = faiss.read_index(index_path)
                 logger.info(f"Loaded FAISS index from {index_path}")
             else:
-                # Create flat index (exact search, good for <1M vectors)
+                # Flat index is simple and works fine for small datasets
                 self.index = faiss.IndexFlatL2(dimension)
                 logger.info(f"Created new FAISS index (dim={dimension})")
                 
         except ImportError:
-            logger.error("FAISS not installed. Install with: pip install faiss-cpu")
+            logger.error("FAISS not installed - pip install faiss-cpu")
             raise
     
     def add_documents(self, documents: List[Dict[str, Any]]):
-        """Add documents with embeddings"""
         import numpy as np
         
         embeddings = []
@@ -73,9 +63,9 @@ class FAISSVectorStore(VectorStore):
         if embeddings:
             embeddings_array = np.array(embeddings).astype('float32')
             self.index.add(embeddings_array)
-            logger.info(f"Added {len(embeddings)} documents to FAISS")
+            logger.info(f"Added {len(embeddings)} documents")
             
-            # Save index if path specified
+            # Save for next time
             if self.index_path:
                 import faiss
                 faiss.write_index(self.index, self.index_path)
@@ -160,7 +150,6 @@ class ChromaVectorStore(VectorStore):
             if "embedding" in doc:
                 embeddings.append(doc["embedding"])
         
-        # Add to collection
         if embeddings:
             self.collection.add(
                 ids=ids,
@@ -169,7 +158,7 @@ class ChromaVectorStore(VectorStore):
                 embeddings=embeddings
             )
         else:
-            # ChromaDB will generate embeddings automatically
+            # ChromaDB can make embeddings for us
             self.collection.add(
                 ids=ids,
                 documents=texts,
@@ -179,7 +168,6 @@ class ChromaVectorStore(VectorStore):
         logger.info(f"Added {len(documents)} documents to ChromaDB")
     
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search ChromaDB"""
         results = self.collection.query(
             query_texts=[query],
             n_results=top_k
@@ -198,15 +186,13 @@ class ChromaVectorStore(VectorStore):
         return formatted_results
     
     def delete_all(self):
-        """Clear all documents"""
         self.client.delete_collection(self.collection.name)
         self.collection = self.client.create_collection(self.collection.name)
         logger.info("Cleared ChromaDB collection")
 
 
-# ============================================================================
-# EMBEDDING GENERATOR
-# ============================================================================
+# Generate embeddings using sentence transformers
+# all-MiniLM-L6-v2 is small and fast - good enough for demo
 
 class EmbeddingGenerator:
     """Generate embeddings for text using various models"""
@@ -294,24 +280,20 @@ class RAGRetriever:
         for i, item in enumerate(context_items, 1):
             context_text += f"{i}. {item['text']}\n"
         
-        # Augment prompt
         augmented_prompt = f"{base_prompt}\n{context_text}\n\nUser Query: {query}"
         return augmented_prompt
 
 
-# ============================================================================
-# KNOWLEDGE BASE BUILDER
-# ============================================================================
-
+# Build a knowledge base from summary stats
+# TODO: could expand this to include more data sources
 class RetailKnowledgeBaseBuilder:
-    """Build knowledge base from retail data summaries"""
     
     @staticmethod
     def build_from_summary_stats(summary_stats: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Create knowledge base items from summary statistics"""
+        # Turn stats into searchable text chunks
         knowledge_items = []
         
-        # Amazon Sales insights
+        # Overall metrics
         if "amazon_sales" in summary_stats:
             amazon = summary_stats["amazon_sales"]
             knowledge_items.append({
@@ -320,7 +302,7 @@ class RetailKnowledgeBaseBuilder:
                 "metadata": {"source": "summary_stats", "category": "overview"}
             })
         
-        # Top categories
+        # Category performance
         if "top_categories" in summary_stats:
             for cat in summary_stats["top_categories"][:5]:
                 knowledge_items.append({
@@ -329,7 +311,7 @@ class RetailKnowledgeBaseBuilder:
                     "metadata": {"source": "top_categories", "category": cat.get('Category')}
                 })
         
-        # Top states
+        # State breakdown
         if "top_states" in summary_stats:
             for state in summary_stats["top_states"][:10]:
                 knowledge_items.append({
@@ -338,7 +320,7 @@ class RetailKnowledgeBaseBuilder:
                     "metadata": {"source": "top_states", "state": state.get('state')}
                 })
         
-        # Status distribution
+        # Order status
         if "status_distribution" in summary_stats:
             for status in summary_stats["status_distribution"]:
                 knowledge_items.append({
@@ -365,7 +347,7 @@ class RetailKnowledgeBaseBuilder:
 # ============================================================================
 
 class RAGFactory:
-    """Factory for creating RAG components"""
+    # Helper to set up RAG components - makes it easier to get started
     
     @staticmethod
     def create_retriever(
@@ -373,15 +355,13 @@ class RAGFactory:
         persist_dir: Optional[str] = None,
         embedding_model: str = "all-MiniLM-L6-v2"
     ) -> RAGRetriever:
-        """Create RAG retriever with specified components"""
         
-        # Create embedder
         embedder = EmbeddingGenerator(model=embedding_model)
         
-        # Create vector store
+        # FAISS is faster, ChromaDB persists better
         if store_type == "faiss":
             vector_store = FAISSVectorStore(
-                dimension=384,  # all-MiniLM-L6-v2 dimension
+                dimension=384,  # matches all-MiniLM-L6-v2
                 index_path=persist_dir
             )
         elif store_type == "chroma":

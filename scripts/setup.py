@@ -3,12 +3,10 @@ import sys
 import os
 from pathlib import Path
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def check_python_version():
-    """Check if Python version is 3.10+"""
     if sys.version_info < (3, 10):
         print("[FAIL] Python 3.10 or higher is required")
         print(f"       Current version: {sys.version}")
@@ -18,7 +16,6 @@ def check_python_version():
 
 
 def install_requirements():
-    """Install required packages"""
     print("\nInstalling required packages...")
     try:
         subprocess.check_call([
@@ -32,7 +29,6 @@ def install_requirements():
 
 
 def check_data_files():
-    """Check if data files exist"""
     print("\nChecking data files...")
     data_path = Path("Sales Dataset/Sales Dataset")
     
@@ -56,7 +52,6 @@ def check_data_files():
 
 
 def check_api_key():
-    """Check if API key is set"""
     print("\nChecking API key...")
     api_key = os.getenv("OPENAI_API_KEY", "")
     
@@ -70,7 +65,6 @@ def check_api_key():
 
 
 def create_directories():
-    """Create necessary directories"""
     print("\nCreating directories...")
     directories = ["vector_store"]
     
@@ -84,32 +78,24 @@ def create_directories():
 
 
 def main():
-    """Main setup function"""
     print("=" * 60)
     print("Retail Insights Assistant - Setup")
     print("=" * 60)
     
-    # Check Python version
     if not check_python_version():
         sys.exit(1)
     
-    # Install requirements
     if not install_requirements():
         print("\nSome packages failed to install. Please check errors above.")
         response = input("Continue anyway? (y/n): ")
         if response.lower() != 'y':
             sys.exit(1)
     
-    # Create directories
     create_directories()
     
-    # Check data files
     data_present = check_data_files()
-    
-    # Check API key
     api_key_set = check_api_key()
-    
-    # Final summary
+  
     print("\n" + "=" * 60)
     print("Setup Summary")
     print("=" * 60)

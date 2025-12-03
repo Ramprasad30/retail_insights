@@ -1,7 +1,3 @@
-"""
-Example usage of Retail Insights Assistant
-Demonstrates both programmatic usage and API patterns
-"""
 import os
 import sys
 from pathlib import Path
@@ -11,7 +7,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def example_1_simple_query():
-    """Example 1: Simple Q&A query"""
     print("\n" + "="*60)
     print("Example 1: Simple Q&A Query")
     print("="*60)
@@ -43,7 +38,6 @@ def example_1_simple_query():
 
 
 def example_2_generate_summary():
-    """Example 2: Generate comprehensive summary"""
     print("\n" + "="*60)
     print("Example 2: Generate Summary")
     print("="*60)
@@ -71,7 +65,6 @@ def example_2_generate_summary():
 
 
 def example_3_data_processor():
-    """Example 3: Direct data processor usage"""
     print("\n" + "="*60)
     print("Example 3: Direct Data Processor Usage")
     print("="*60)
@@ -120,7 +113,6 @@ def example_3_data_processor():
 
 
 def example_4_multiple_queries():
-    """Example 4: Multiple queries in sequence"""
     print("\n" + "="*60)
     print("Example 4: Multiple Queries")
     print("="*60)
@@ -157,7 +149,6 @@ def example_4_multiple_queries():
 
 
 def example_5_export_data():
-    """Example 5: Export query results to CSV/Excel"""
     print("\n" + "="*60)
     print("Example 5: Export Query Results")
     print("="*60)
@@ -207,7 +198,6 @@ def example_5_export_data():
 
 
 def main():
-    """Run all examples"""
     print("="*60)
     print("🛍️  Retail Insights Assistant - Usage Examples")
     print("="*60)

@@ -1,8 +1,5 @@
-"""
-Scalability Components for 100GB+ Data Processing
-Implements data engineering, storage, retrieval, and orchestration patterns
-required for enterprise-scale deployment.
-"""
+# Scalability stuff for handling big datasets
+# TODO: might need to refactor this later when we hit actual production scale
 
 import os
 from typing import Dict, Any, List, Optional
@@ -13,29 +10,22 @@ from abc import ABC, abstractmethod
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# A. DATA ENGINEERING - Ingestion & Preprocessing
-# ============================================================================
-
+# Data ingestion strategies - started simple, can scale up as needed
 class DataIngestionStrategy(ABC):
-    """Abstract base for data ingestion strategies"""
     
     @abstractmethod
     def ingest(self, source: str, destination: str) -> Dict[str, Any]:
-        """Ingest data from source to destination"""
         pass
     
     @abstractmethod
     def validate(self, data_path: str) -> bool:
-        """Validate data quality"""
         pass
 
 
 class LocalCSVIngestion(DataIngestionStrategy):
-    """Current implementation - Local CSV files"""
+    # Basic CSV loader - works fine for now
     
     def ingest(self, source: str, destination: str) -> Dict[str, Any]:
-        """Load CSV to DuckDB"""
         import duckdb
         import pandas as pd
         
@@ -43,7 +33,7 @@ class LocalCSVIngestion(DataIngestionStrategy):
         table_name = Path(source).stem.replace(' ', '_').replace('-', '_')
         
         try:
-            # Load CSV with auto-detection
+            # DuckDB's read_csv_auto is pretty smart
             conn.execute(f"""
                 CREATE OR REPLACE TABLE {table_name} AS 
                 SELECT * FROM read_csv_auto('{source}', 
@@ -68,7 +58,7 @@ class LocalCSVIngestion(DataIngestionStrategy):
             conn.close()
     
     def validate(self, data_path: str) -> bool:
-        """Check if CSV is valid"""
+        # Quick sanity check
         try:
             import pandas as pd
             df = pd.read_csv(data_path, nrows=10)
@@ -78,24 +68,23 @@ class LocalCSVIngestion(DataIngestionStrategy):
 
 
 class DaskDistributedIngestion(DataIngestionStrategy):
-    """Scalable ingestion using Dask for 10GB+ files"""
+    # For when files get too big for memory
     
     def __init__(self, n_workers: int = 4):
         self.n_workers = n_workers
     
     def ingest(self, source: str, destination: str) -> Dict[str, Any]:
-        """Process large CSV files in parallel using Dask"""
         try:
             import dask.dataframe as dd
             
-            # Read in chunks
+            # Process in chunks - 64MB seems to work well
             logger.info(f"Reading {source} with Dask ({self.n_workers} workers)")
             ddf = dd.read_csv(source, blocksize='64MB')
             
-            # Data cleaning
+            # Basic cleaning
             ddf = ddf.dropna(how='all')
             
-            # Convert to Parquet (10x smaller, faster queries)
+            # Parquet is way faster than CSV for analytics
             parquet_path = destination.replace('.db', '.parquet')
             ddf.to_parquet(
                 parquet_path,
@@ -111,14 +100,13 @@ class DaskDistributedIngestion(DataIngestionStrategy):
                 "partitions": ddf.npartitions
             }
         except ImportError:
-            logger.warning("Dask not installed. Install with: pip install dask[dataframe]")
+            logger.warning("Dask not installed - pip install dask[dataframe]")
             return {"status": "error", "error": "Dask not available"}
         except Exception as e:
             logger.error(f"Dask ingestion failed: {e}")
             return {"status": "error", "error": str(e)}
     
     def validate(self, data_path: str) -> bool:
-        """Validate parquet file"""
         try:
             import pyarrow.parquet as pq
             table = pq.read_table(data_path)
@@ -128,16 +116,16 @@ class DaskDistributedIngestion(DataIngestionStrategy):
 
 
 class SparkDistributedIngestion(DataIngestionStrategy):
-    """Enterprise-scale ingestion using PySpark for 100GB+ datasets"""
+    # For really big datasets - haven't needed this yet but it's ready
     
     def __init__(self, spark_config: Optional[Dict] = None):
+        # Some reasonable defaults that worked in testing
         self.config = spark_config or {
             "spark.sql.adaptive.enabled": "true",
             "spark.sql.adaptive.coalescePartitions.enabled": "true"
         }
     
     def ingest(self, source: str, destination: str) -> Dict[str, Any]:
-        """Process massive datasets with Spark"""
         try:
             from pyspark.sql import SparkSession
             
@@ -146,18 +134,16 @@ class SparkDistributedIngestion(DataIngestionStrategy):
                 .config("spark.driver.memory", "4g") \
                 .getOrCreate()
             
-            # Configure for optimizations
             for key, value in self.config.items():
                 spark.conf.set(key, value)
             
-            # Read CSV
             df = spark.read.csv(source, header=True, inferSchema=True)
             
-            # Data quality checks
+            # Clean up bad rows
             df = df.dropna(how='all')
             df = df.dropDuplicates()
             
-            # Write as Delta Lake (ACID transactions + time travel)
+            # Delta Lake gives us ACID + versioning which is nice
             delta_path = destination.replace('.db', '_delta')
             df.write.format("delta") \
                 .mode("overwrite") \
@@ -293,19 +279,17 @@ class QueryOptimizer:
 
 
 class MetadataFilter:
-    """Filter data using metadata before full scan"""
+    # Helps avoid scanning irrelevant data partitions
     
     def __init__(self, metadata_store: Dict):
         self.metadata = metadata_store
     
     def filter_partitions(self, query: str) -> List[str]:
-        """Return only relevant partitions to scan"""
-        # Example: if query filters by date, only return matching partitions
+        # Figure out which partitions we actually need to look at
         relevant_partitions = []
         
-        # Parse query for date filters (simplified)
         if "WHERE" in query.upper():
-            # In production, use proper SQL parser
+            # TODO: use a proper SQL parser instead of this hack
             for partition, meta in self.metadata.items():
                 if self._partition_matches(query, meta):
                     relevant_partitions.append(partition)
@@ -313,32 +297,26 @@ class MetadataFilter:
         return relevant_partitions or list(self.metadata.keys())
     
     def _partition_matches(self, query: str, metadata: Dict) -> bool:
-        """Check if partition matches query filters"""
-        # Simplified logic - enhance with proper query parsing
-        return True  # Default: include all
+        # Simplified for now - good enough for demo
+        return True
 
 
-# ============================================================================
-# D. ORCHESTRATION - Workflow management & caching
-# ============================================================================
-
+# Query caching - saves a ton of money on repeated questions
 class QueryCache:
-    """In-memory and Redis-backed query result cache"""
     
     def __init__(self, backend: str = "memory", redis_url: Optional[str] = None):
         self.backend = backend
-        self.memory_cache = {}
+        self.memory_cache = {}  # simple dict works fine for local
         
         if backend == "redis" and redis_url:
             try:
                 import redis
                 self.redis_client = redis.from_url(redis_url)
             except ImportError:
-                logger.warning("redis not installed. Using memory cache. Install: pip install redis")
+                logger.warning("redis not installed - falling back to memory cache")
                 self.backend = "memory"
     
     def get(self, key: str) -> Optional[Any]:
-        """Get cached result"""
         if self.backend == "memory":
             return self.memory_cache.get(key)
         else:
@@ -384,18 +362,17 @@ class WorkflowOrchestrator:
         }
     
     def execute_with_cache(self, query: str, executor_fn, ttl: int = 3600) -> Any:
-        """Execute query with caching"""
         import hashlib
         cache_key = hashlib.md5(query.encode()).hexdigest()
         
-        # Try cache first
+        # Check cache first - way faster
         result = self.cache.get(cache_key)
         if result is not None:
             self.metrics["cache_hits"] += 1
-            logger.info(f"Cache HIT for query: {query[:50]}...")
+            logger.info(f"Cache HIT: {query[:50]}...")
             return result
         
-        # Cache miss - execute
+        # Dang, gotta run the query
         self.metrics["cache_misses"] += 1
         self.metrics["queries_executed"] += 1
         logger.info(f"Cache MISS - executing: {query[:50]}...")
@@ -406,11 +383,10 @@ class WorkflowOrchestrator:
             return result
         except Exception as e:
             self.metrics["errors"] += 1
-            logger.error(f"Query execution failed: {e}")
+            logger.error(f"Query failed: {e}")
             raise
     
     def get_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics"""
         total = self.metrics["cache_hits"] + self.metrics["cache_misses"]
         hit_rate = self.metrics["cache_hits"] / total if total > 0 else 0
         
@@ -421,12 +397,8 @@ class WorkflowOrchestrator:
         }
 
 
-# ============================================================================
-# E. MONITORING - Cost & performance tracking
-# ============================================================================
-
+# Performance monitoring - keep track of costs and latency
 class PerformanceMonitor:
-    """Monitor query performance and costs"""
     
     def __init__(self):
         self.query_log = []
@@ -476,34 +448,31 @@ class PerformanceMonitor:
         return alerts
 
 
-# ============================================================================
-# FACTORY - Select appropriate strategy based on data size
-# ============================================================================
-
+# Pick the right strategy based on data size - keeps it simple
 class ScalabilityFactory:
-    """Factory to select appropriate strategy based on data size"""
     
     @staticmethod
     def get_ingestion_strategy(data_size_gb: float) -> DataIngestionStrategy:
-        """Select ingestion strategy based on data size"""
+        # Small files - just use local
         if data_size_gb < 1:
             return LocalCSVIngestion()
+        # Medium - Dask works well
         elif data_size_gb < 50:
             return DaskDistributedIngestion()
+        # Big stuff - need Spark
         else:
             return SparkDistributedIngestion()
     
     @staticmethod
     def get_storage_strategy(deployment: str = "local") -> StorageStrategy:
-        """Select storage based on deployment environment"""
         if deployment == "aws":
             return S3Storage(bucket=os.getenv("S3_BUCKET", "retail-insights"))
-        # Add GCS, Azure options here
+        # TODO: add GCS and Azure when needed
         return LocalStorage()
     
     @staticmethod
     def get_cache_backend(deployment: str = "local") -> QueryCache:
-        """Select cache backend"""
+        # Use Redis in production, memory for local dev
         if deployment in ["production", "aws", "gcp", "azure"]:
             redis_url = os.getenv("REDIS_URL")
             if redis_url:
@@ -511,18 +480,13 @@ class ScalabilityFactory:
         return QueryCache(backend="memory")
 
 
-# ============================================================================
-# EXAMPLE USAGE
-# ============================================================================
-
+# Quick test/demo
 if __name__ == "__main__":
-    # Example: Auto-select strategy based on data size
     data_size = 0.5  # GB
     
     ingestion = ScalabilityFactory.get_ingestion_strategy(data_size)
-    print(f"Selected ingestion strategy: {ingestion.__class__.__name__}")
+    print(f"Using: {ingestion.__class__.__name__}")
     
-    # Example: Use cache
     cache = ScalabilityFactory.get_cache_backend("local")
     orchestrator = WorkflowOrchestrator(cache)
     
