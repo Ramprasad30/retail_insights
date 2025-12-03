@@ -150,13 +150,14 @@ Return a JSON response with:
             
             result = json.loads(content)
             
-            state["query_type"] = result.get("query_type", "qa")
+            # DO NOT overwrite query_type - respect the user's mode selection from UI
+            # state["query_type"] = result.get("query_type", "qa")  # REMOVED - was causing bug!
             state["sql_query"] = result.get("sql_query", "")
             state["messages"] = state.get("messages", []) + [
                 AIMessage(content=f"Query Analysis: {result.get('reasoning', '')}")
             ]
             
-            logger.info(f"Query Type: {state['query_type']}")
+            logger.info(f"Query Type (from UI): {state['query_type']}")
             logger.info(f"SQL Query: {state['sql_query']}")
             
         except json.JSONDecodeError as e:
@@ -295,6 +296,78 @@ Return a JSON response with:
         
         return state
     
+    def _generate_direct_answer(self, query: str, data: dict) -> str:
+        """Generate direct answer from data without LLM for common questions"""
+        if not isinstance(data, dict):
+            logger.warning(f"Data is not a dict: {type(data)}")
+            return None
+            
+        q = query.lower()
+        logger.info(f"Checking direct answer for: {q}")
+        
+        # Top categories - match various phrasings
+        if ('categor' in q or 'product' in q or 'selling' in q) and any(w in q for w in ['top', 'best', 'highest', '5', 'five']):
+            cats = data.get('top_categories', [])[:5]
+            if cats:
+                lines = ["**Top 5 Categories by Revenue:**"]
+                for i, c in enumerate(cats, 1):
+                    lines.append(f"{i}. {c.get('Category', '?')} - ₹{c.get('revenue', 0):,.0f} ({c.get('order_count', 0):,} orders)")
+                return "\n".join(lines)
+        
+        # Top states
+        if any(w in q for w in ['top', 'best', 'highest']) and 'state' in q:
+            states = data.get('top_states', [])[:5]
+            if states:
+                lines = ["**Top 5 States by Revenue:**"]
+                for i, s in enumerate(states, 1):
+                    lines.append(f"{i}. {s.get('state', '?')} - ₹{s.get('revenue', 0):,.0f} ({s.get('order_count', 0):,} orders)")
+                return "\n".join(lines)
+        
+        # Which state highest
+        if 'which state' in q and any(w in q for w in ['highest', 'most', 'top']):
+            states = data.get('top_states', [])
+            if states:
+                s = states[0]
+                return f"**{s.get('state', '?')}** has the highest revenue at ₹{s.get('revenue', 0):,.0f} from {s.get('order_count', 0):,} orders."
+        
+        # Cancelled orders
+        if 'cancel' in q:
+            status = data.get('status_distribution', [])
+            for s in status:
+                if 'cancel' in s.get('Status', '').lower():
+                    return f"**{s.get('count', 0):,} orders were cancelled** ({s.get('percentage', 0)}% of total)."
+        
+        # Total revenue
+        if 'total revenue' in q or 'total sales' in q:
+            amazon = data.get('amazon_sales', {})
+            return f"**Total Revenue:** ₹{amazon.get('total_revenue', 0):,.0f} from {amazon.get('total_orders', 0):,} orders."
+        
+        # Average order value
+        if 'average' in q and 'order' in q:
+            amazon = data.get('amazon_sales', {})
+            return f"**Average Order Value:** ₹{amazon.get('avg_order_value', 0):,.2f}"
+        
+        # How many orders
+        if 'how many' in q and 'order' in q:
+            amazon = data.get('amazon_sales', {})
+            return f"**Total Orders:** {amazon.get('total_orders', 0):,}"
+        
+        # Status distribution
+        if 'status' in q and 'distribution' in q:
+            status = data.get('status_distribution', [])[:5]
+            if status:
+                lines = ["**Order Status Distribution:**"]
+                for s in status:
+                    lines.append(f"• {s.get('Status', '?')} - {s.get('count', 0):,} ({s.get('percentage', 0)}%)")
+                return "\n".join(lines)
+        
+        # Inventory/stock
+        if 'inventory' in q or 'stock' in q:
+            inv = data.get('inventory', {})
+            return f"**Inventory:** {inv.get('total_skus', 0):,} SKUs with {inv.get('total_stock', 0):,} total units across {inv.get('unique_categories', 0)} categories."
+        
+        return None  # Let LLM handle complex questions
+    
     def _format_data_concisely(self, query: str, full_data: dict) -> str:
         """Format relevant data concisely for LLM context"""
         query_lower = query.lower()
@@ -408,8 +481,12 @@ and suggest alternative queries.""")
             })
             
         else:
-            # Successful query - generate insights
+            # CLEAR SEPARATION: Summary vs Q&A
+            logger.info(f"Query type: {query_type}")
+            
             if query_type == "summary":
+                # SUMMARY MODE: Full executive report
+                logger.info("=== SUMMARY MODE ===")
                 prompt = ChatPromptTemplate.from_messages([
                     ("system", """You are an expert retail analytics consultant.
 Generate a comprehensive, executive-level summary of the retail performance data provided.
@@ -434,20 +511,30 @@ Generate a professional business summary of the retail performance.""")
                     "data_summary": json.dumps(data_result, indent=2)
                 })
             else:
-                # Format data concisely for Q&A
+                # Q&A MODE: Short direct answers
+                logger.info("=== Q&A MODE ===")
+                logger.info(f"User query: {user_query}")
+                logger.info(f"Data keys: {data_result.keys() if isinstance(data_result, dict) else 'not a dict'}")
+                
+                # Try direct answer first (no LLM)
+                direct_answer = self._generate_direct_answer(user_query, data_result)
+                logger.info(f"Direct answer result: {direct_answer[:100] if direct_answer else 'None'}")
+                
+                if direct_answer:
+                    state["final_response"] = direct_answer
+                    state["messages"] = state.get("messages", []) + [AIMessage(content=direct_answer)]
+                    logger.info("Returning direct answer")
+                    return state
+                
+                # Fallback to short LLM response
+                logger.info("Falling back to LLM")
                 concise_data = self._format_data_concisely(user_query, data_result)
-                
                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", "Answer in ONE short paragraph. Max 50 words. List items with bullets. Numbers only, no analysis."),
-                    ("user", "{user_query}\n\n{data}")
+                    ("system", "Answer in ONE sentence. No analysis."),
+                    ("user", "{user_query}\n{data}")
                 ])
-                
-                # Use short LLM with token limit for Q&A
                 chain = prompt | self.llm_short
-                response = chain.invoke({
-                    "user_query": user_query,
-                    "data": concise_data
-                })
+                response = chain.invoke({"user_query": user_query, "data": concise_data})
         
         final_response = response.content
         state["final_response"] = final_response
