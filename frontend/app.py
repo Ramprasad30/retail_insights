@@ -6,6 +6,7 @@ from typing import Dict, Any
 import json
 import os
 import sys
+import logging
 
 import sys
 from pathlib import Path
@@ -16,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.config import PAGE_TITLE, PAGE_ICON, LAYOUT, OPENAI_API_KEY, GOOGLE_API_KEY
 from backend.agents import MultiAgentRetailAssistant
 from backend.data_processor import RetailDataProcessor
+
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -56,18 +59,64 @@ def initialize_assistant(api_key: str, provider: str = "OpenAI"):
     try:
         return MultiAgentRetailAssistant(api_key=api_key, provider=provider)
     except Exception as e:
-        st.error(f"Error initializing assistant: {e}")
+        error_msg = str(e)
+        # Provide more helpful error messages
+        if "locked" in error_msg.lower() or "cannot access" in error_msg.lower():
+            st.error(f"""
+            **Database Lock Error:**
+            
+            The database file is currently being used by another process.
+            
+            **Solutions:**
+            1. Close any other Python processes that might be using the database
+            2. Restart your application
+            3. If the problem persists, try closing the database file manually
+            
+            **Technical Details:**
+            {error_msg}
+            """)
+        else:
+            st.error(f"Error initializing assistant: {error_msg}")
         return None
 
 
 @st.cache_resource
 def initialize_data_processor():
     try:
+        # Initialize data processor without read_only parameter
         processor = RetailDataProcessor()
-        processor.load_data()
+        # Try to load, but don't fail if data is already loaded
+        try:
+            processor.load_data()
+        except Exception as load_error:
+            logger.warning(f"Could not load data: {load_error}")
+            # Check if tables already exist
+            try:
+                tables = processor.conn.execute("SHOW TABLES").fetchall()
+                if tables:
+                    processor.tables_loaded = True
+                    logger.info(f"Using existing tables: {[t[0] for t in tables]}")
+            except:
+                pass
         return processor
     except Exception as e:
-        st.error(f"Error initializing data processor: {e}")
+        error_msg = str(e)
+        if "locked" in error_msg.lower() or "cannot access" in error_msg.lower():
+            st.error(f"""
+            **Database Lock Error:**
+            
+            The database file is currently being used by another process (PID 47736).
+            
+            **Solutions:**
+            1. Close the other Python process using Task Manager or: `taskkill /PID 47736 /F`
+            2. Restart your application
+            3. Wait a few moments and refresh the page
+            
+            **Technical Details:**
+            {error_msg}
+            """)
+        else:
+            st.error(f"Error initializing data processor: {error_msg}")
         return None
 
 

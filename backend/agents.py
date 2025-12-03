@@ -1,5 +1,5 @@
 import json
-from typing import TypedDict, Annotated, Sequence, List, Dict, Any
+from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -7,9 +7,19 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 import operator
 import logging
+import time
 
 from .data_processor import RetailDataProcessor
 from .config import OPENAI_MODEL, GEMINI_MODEL, TEMPERATURE, OPENAI_API_KEY, GOOGLE_API_KEY
+
+# Import scalability components
+try:
+    from .scalability import WorkflowOrchestrator, QueryCache, PerformanceMonitor, QueryOptimizer
+    from .rag_vector_store import RAGFactory, RetailKnowledgeBaseBuilder
+    SCALABILITY_ENABLED = True
+except ImportError:
+    SCALABILITY_ENABLED = False
+    logging.warning("Scalability components not available - running in basic mode")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,7 +40,7 @@ class AgentState(TypedDict):
 
 class MultiAgentRetailAssistant:
     
-    def __init__(self, api_key: str = None, provider: str = "OpenAI"):
+    def __init__(self, api_key: str = None, provider: str = "OpenAI", enable_caching: bool = True, enable_rag: bool = False):
         self.provider = provider
         self.api_key = api_key
         
@@ -72,6 +82,39 @@ class MultiAgentRetailAssistant:
         self.data_processor = RetailDataProcessor()
         self.data_processor.load_data()
         
+        # Initialize scalability components if enabled
+        self.orchestrator = None
+        self.performance_monitor = None
+        self.rag_retriever = None
+        
+        if SCALABILITY_ENABLED:
+            if enable_caching:
+                try:
+                    cache = QueryCache(backend="memory")  # Can be upgraded to Redis
+                    self.orchestrator = WorkflowOrchestrator(cache)
+                    logger.info("✓ Query caching enabled")
+                except Exception as e:
+                    logger.warning(f"Cache initialization failed: {e}")
+            
+            # Initialize performance monitoring
+            try:
+                self.performance_monitor = PerformanceMonitor()
+                logger.info("✓ Performance monitoring enabled")
+            except Exception as e:
+                logger.warning(f"Performance monitor initialization failed: {e}")
+            
+            # Initialize RAG if requested
+            if enable_rag:
+                try:
+                    self.rag_retriever = RAGFactory.create_retriever(store_type="chroma")
+                    # Build knowledge base from summary statistics
+                    summary_stats = self.data_processor.get_summary_statistics()
+                    kb_items = RetailKnowledgeBaseBuilder.build_from_summary_stats(summary_stats)
+                    self.rag_retriever.index_knowledge_base(kb_items)
+                    logger.info("✓ RAG (vector store) enabled with knowledge base")
+                except Exception as e:
+                    logger.warning(f"RAG initialization failed: {e}")
+        
         # Build the agent graph
         self.graph = self._build_graph()
         
@@ -102,32 +145,106 @@ class MultiAgentRetailAssistant:
         
         # Create prompt for query understanding
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a Query Resolution Agent for a retail analytics system.
-            
-Your job is to:
-1. Understand the user's natural language query
-2. Determine if it's a SUMMARY request or a specific Q&A query
-3. Identify which tables and columns are needed
-4. Generate an appropriate SQL query using DuckDB syntax
+            ("system", """You are an analytics Q&A engine for a retail analytics system.
 
 Available Tables and Columns:
 {schema_info}
 
-Guidelines:
-- For summary requests, focus on aggregations and overall trends
-- For specific questions, create precise WHERE clauses
-- Use proper SQL syntax with DuckDB conventions
-- Handle date fields carefully (they may be strings)
-- Cast numeric fields as DOUBLE when doing calculations
-- Always check for NULL and empty strings in WHERE clauses
+CRITICAL INSTRUCTIONS:
+-----------------------
+Step 1: CLASSIFY QUESTION
+-----------------------
+Identify:
+- Intent category: Ranking / Aggregation / Distribution / Comparison / KPI / Boolean
+- Expected output type: list / dict / float / int / string / boolean
+- Query type: "summary" (comprehensive overview) or "qa" (specific question)
+- Requested count: Extract any number mentioned (top 3, top 5, top 10, etc.)
 
-Return a JSON response with:
+Rules:
+- "top N", "highest", "lowest", "best", "worst" → Ranking → list
+- "average", "sum", "count", "total", "min/max" → Aggregation → int/float
+- "distribution", "breakdown", "status" → Distribution → dict/list
+- "compare", "trend" → Comparison → boolean or numeric
+- "What is the...?" → KPI → int/float/string
+- Yes/No questions → boolean
+
+IMPORTANT: Extract the specific number if user asks for "top 3", "top 6", "top 10", etc.
+           Default to 5 only if no number is specified.
+
+-----------------------
+Step 2: SQL GENERATION
+-----------------------
+Generate SQL using ONLY these rules:
+1. The 'Amount' column is ALREADY NUMERIC - use it directly, NO TRIM, NO CAST needed
+2. For aggregations on Amount: SUM(Amount), AVG(Amount), MAX(Amount) - that's it!
+3. For other text columns that might have numbers: use TRY_CAST(column AS DOUBLE)
+4. Use proper NULL checks: WHERE column IS NOT NULL
+5. For rankings: always ORDER BY metric DESC and use LIMIT N (where N is the user's requested count)
+6. For distributions: use GROUP BY with COUNT(*) or SUM(Amount)
+7. EXTRACT the count from user query: "top 3" → LIMIT 3, "top 10" → LIMIT 10, no number → LIMIT 5
+
+Column Type Reference:
+- Amount: NUMERIC (ready to use)
+- Qty: TEXT (use TRY_CAST if needed)
+- Category, Status, ship-state: TEXT (use as-is)
+- Date: TEXT (use as-is for grouping)
+
+-----------------------
+Step 3: RESPOND WITH JSON
+-----------------------
+Return ONLY this JSON format:
 {{
-    "query_type": "summary" or "qa",
-    "reasoning": "Brief explanation of your understanding",
-    "sql_query": "The SQL query to execute",
-    "tables_used": ["list", "of", "tables"]
+    "intent": "<Ranking|Aggregation|Distribution|Comparison|KPI|Boolean>",
+    "query_type": "<summary|qa>",
+    "expected_output_type": "<string|int|float|list|dict|boolean>",
+    "reasoning": "Brief explanation",
+    "sql_query": "<valid_duckdb_sql>",
+    "tables_used": ["table_names"]
 }}
+
+EXAMPLES:
+
+Q: "What are the top 5 selling categories?"
+{{
+    "intent": "Ranking",
+    "query_type": "qa",
+    "expected_output_type": "list",
+    "reasoning": "User wants ranked list of top 5 categories by sales",
+    "sql_query": "SELECT Category, SUM(Amount) AS TotalSales FROM amazon_sales WHERE Category IS NOT NULL GROUP BY Category ORDER BY TotalSales DESC LIMIT 5",
+    "tables_used": ["amazon_sales"]
+}}
+
+Q: "What are the top 10 selling categories?"
+{{
+    "intent": "Ranking",
+    "query_type": "qa",
+    "expected_output_type": "list",
+    "reasoning": "User wants ranked list of top 10 categories by sales",
+    "sql_query": "SELECT Category, SUM(Amount) AS TotalSales FROM amazon_sales WHERE Category IS NOT NULL GROUP BY Category ORDER BY TotalSales DESC LIMIT 10",
+    "tables_used": ["amazon_sales"]
+}}
+
+Q: "Which state has the highest revenue?"
+{{
+    "intent": "Ranking",
+    "query_type": "qa",
+    "expected_output_type": "string",
+    "reasoning": "User wants the single state with max revenue",
+    "sql_query": "SELECT \\"ship-state\\", SUM(Amount) AS total_revenue FROM amazon_sales WHERE \\"ship-state\\" IS NOT NULL GROUP BY \\"ship-state\\" ORDER BY total_revenue DESC LIMIT 1",
+    "tables_used": ["amazon_sales"]
+}}
+
+Q: "What is the average order value?"
+{{
+    "intent": "Aggregation",
+    "query_type": "qa",
+    "expected_output_type": "float",
+    "reasoning": "User wants average of Amount column",
+    "sql_query": "SELECT AVG(Amount) AS avg_order_value FROM amazon_sales WHERE Amount IS NOT NULL",
+    "tables_used": ["amazon_sales"]
+}}
+
+Remember: Amount is NUMERIC - never use TRIM() on it!
 """),
             ("user", "{user_query}")
         ])
@@ -228,14 +345,36 @@ Return a JSON response with:
             
         except Exception as e:
             logger.error(f"Error executing query: {e}")
-            state["data_result"] = {
-                "error": str(e),
-                "data": [],
-                "row_count": 0
-            }
-            state["messages"] = state.get("messages", []) + [
-                AIMessage(content=f"Error extracting data: {str(e)}")
-            ]
+            logger.info("SQL failed, falling back to summary statistics")
+            
+            # For Q&A mode, try to use summary stats as fallback
+            if state.get("query_type") == "qa":
+                try:
+                    summary_stats = self.data_processor.get_summary_statistics()
+                    state["data_result"] = summary_stats
+                    state["validation_status"] = "PASSED"
+                    state["messages"] = state.get("messages", []) + [
+                        AIMessage(content="Using summary data to answer your question")
+                    ]
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed: {fallback_error}")
+                    state["data_result"] = {
+                        "error": f"Query error: {str(e)}",
+                        "data": [],
+                        "row_count": 0
+                    }
+                    state["messages"] = state.get("messages", []) + [
+                        AIMessage(content=f"I encountered an error: {str(e)[:100]}")
+                    ]
+            else:
+                state["data_result"] = {
+                    "error": str(e),
+                    "data": [],
+                    "row_count": 0
+                }
+                state["messages"] = state.get("messages", []) + [
+                    AIMessage(content=f"Error extracting data: {str(e)}")
+                ]
         
         return state
     
@@ -305,20 +444,118 @@ Return a JSON response with:
         q = query.lower()
         logger.info(f"Checking direct answer for: {q}")
         
+        # Check if this is SQL query result data (has 'data', 'row_count', 'columns' keys)
+        if 'data' in data and 'row_count' in data and 'columns' in data:
+            logger.info(f"Processing SQL result with {data['row_count']} rows")
+            rows = data['data']
+            row_count = data['row_count']
+            columns = data['columns']
+            
+            if row_count == 0:
+                return "No matching data found for your query."
+            
+            # Format the SQL results based on what was asked
+            # Top categories
+            if ('categor' in q or 'selling' in q) and any(w in q for w in ['top', 'best', 'highest', '5', 'five']):
+                if rows and len(rows) > 0:
+                    # Dynamically show the number of results we have
+                    count = min(len(rows), row_count)
+                    lines = [f"**Top Selling Categories:**"]
+                    for i, row in enumerate(rows, 1):
+                        cat = row.get('Category', row.get('category', '?'))
+                        # Check multiple possible column names for revenue
+                        rev = (row.get('TotalSales') or row.get('total_sales') or 
+                               row.get('revenue') or row.get('Amount') or 0)
+                        lines.append(f"{i}. {cat} - ₹{rev:,.0f}")
+                    return "\n".join(lines)
+            
+            # State revenue question
+            if 'state' in q and any(w in q for w in ['highest', 'most', 'top', 'best']) and 'revenue' in q:
+                if rows and len(rows) > 0:
+                    row = rows[0]
+                    state = row.get('ship-state', row.get('state', '?'))
+                    # Check multiple possible column names for revenue
+                    revenue = (row.get('total_revenue') or row.get('TotalRevenue') or 
+                               row.get('revenue') or row.get('Amount') or 0)
+                    return f"**{state}** has the highest revenue at ₹{revenue:,.0f}."
+            
+            # Low stock / inventory questions
+            if any(w in q for w in ['stock', 'inventory', 'low']) and row_count > 0:
+                lines = [f"**Found {row_count} products with low stock:**"]
+                for i, row in enumerate(rows[:10], 1):  # Show first 10
+                    sku = row.get('SKU Code', row.get('sku', '?'))
+                    design = row.get('Design No.', row.get('design', ''))
+                    cat = row.get('Category', row.get('category', '?'))
+                    stock = row.get('Stock', row.get('stock', 0))
+                    lines.append(f"{i}. {cat} - {design or sku} (Stock: {stock})")
+                if row_count > 10:
+                    lines.append(f"...and {row_count - 10} more products")
+                return "\n".join(lines)
+            
+            # Generic result formatting for other queries
+            if row_count == 1 and len(columns) <= 2:
+                # Simple single-value answer
+                row = rows[0]
+                if len(columns) == 1:
+                    val = row.get(columns[0], '?')
+                    return f"**{val}**"
+                else:
+                    # Two columns, format as key-value
+                    k = row.get(columns[0], '?')
+                    v = row.get(columns[1], '?')
+                    if isinstance(v, (int, float)):
+                        return f"**{k}:** ₹{v:,.0f}" if v > 1000 else f"**{k}:** {v:,.2f}"
+                    return f"**{k}:** {v}"
+            
+            # For multiple rows with numeric data, format as a list
+            if row_count > 1 and len(columns) == 2:
+                # Check if second column is numeric
+                first_val = rows[0].get(columns[1], 0)
+                if isinstance(first_val, (int, float)):
+                    lines = [f"**{columns[0]} by {columns[1]}:**"]
+                    for i, row in enumerate(rows[:10], 1):
+                        k = row.get(columns[0], '?')
+                        v = row.get(columns[1], 0)
+                        if v > 1000:  # Likely currency
+                            lines.append(f"{i}. {k} - ₹{v:,.0f}")
+                        elif v > 1:  # Regular number
+                            lines.append(f"{i}. {k} - {v:,.2f}")
+                        else:  # Small decimal
+                            lines.append(f"{i}. {k} - {v:.2f}")
+                    if row_count > 10:
+                        lines.append(f"...and {row_count - 10} more")
+                    return "\n".join(lines)
+            
+            # For multiple rows, let LLM handle formatting
+            return None
+        
+        # OLD LOGIC: For summary statistics format (fallback)
         # Top categories - match various phrasings
         if ('categor' in q or 'product' in q or 'selling' in q) and any(w in q for w in ['top', 'best', 'highest', '5', 'five']):
-            cats = data.get('top_categories', [])[:5]
+            cats = data.get('top_categories', [])
             if cats:
-                lines = ["**Top 5 Categories by Revenue:**"]
+                # Extract requested count from query, default to 5
+                import re
+                count_match = re.search(r'top\s+(\d+)|(\d+)\s+top', q.lower())
+                requested_count = int(count_match.group(1) or count_match.group(2)) if count_match else 5
+                
+                cats = cats[:requested_count]  # Limit to requested count
+                lines = [f"**Top {requested_count} Categories by Revenue:**"]
                 for i, c in enumerate(cats, 1):
                     lines.append(f"{i}. {c.get('Category', '?')} - ₹{c.get('revenue', 0):,.0f} ({c.get('order_count', 0):,} orders)")
                 return "\n".join(lines)
         
         # Top states
         if any(w in q for w in ['top', 'best', 'highest']) and 'state' in q:
-            states = data.get('top_states', [])[:5]
+            states = data.get('top_states', [])
             if states:
-                lines = ["**Top 5 States by Revenue:**"]
+                # Extract requested count from query, default to 5
+                import re
+                count_match = re.search(r'top\s+(\d+)|(\d+)\s+top', q.lower())
+                requested_count = int(count_match.group(1) or count_match.group(2)) if count_match else 5
+                
+                states = states[:requested_count]
+                lines = [f"**Top {requested_count} States by Revenue:**"]
                 for i, s in enumerate(states, 1):
                     lines.append(f"{i}. {s.get('state', '?')} - ₹{s.get('revenue', 0):,.0f} ({s.get('order_count', 0):,} orders)")
                 return "\n".join(lines)
@@ -360,11 +597,6 @@ Return a JSON response with:
                 for s in status:
                     lines.append(f"• {s.get('Status', '?')} - {s.get('count', 0):,} ({s.get('percentage', 0)}%)")
                 return "\n".join(lines)
-        
-        # Inventory/stock
-        if 'inventory' in q or 'stock' in q:
-            inv = data.get('inventory', {})
-            return f"**Inventory:** {inv.get('total_skus', 0):,} SKUs with {inv.get('total_stock', 0):,} total units across {inv.get('unique_categories', 0)} categories."
         
         return None  # Let LLM handle complex questions
     
@@ -526,15 +758,47 @@ Generate a professional business summary of the retail performance.""")
                     logger.info("Returning direct answer")
                     return state
                 
-                # Fallback to short LLM response
+                # Fallback to LLM with better context
                 logger.info("Falling back to LLM")
-                concise_data = self._format_data_concisely(user_query, data_result)
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", "Answer in ONE sentence. No analysis."),
-                    ("user", "{user_query}\n{data}")
-                ])
-                chain = prompt | self.llm_short
-                response = chain.invoke({"user_query": user_query, "data": concise_data})
+                
+                # If we have SQL query results, format them nicely for the LLM
+                if 'data' in data_result and data_result.get('row_count', 0) > 0:
+                    rows = data_result['data']
+                    row_count = data_result['row_count']
+                    
+                    # Create a concise data summary for LLM
+                    data_summary = f"Query returned {row_count} results:\n"
+                    for i, row in enumerate(rows[:20], 1):  # Show first 20 rows
+                        data_summary += f"{i}. {row}\n"
+                    if row_count > 20:
+                        data_summary += f"...and {row_count - 20} more rows"
+                    
+                    prompt = ChatPromptTemplate.from_messages([
+                        ("system", """You are a retail analytics assistant. Answer the question based ONLY on the data provided.
+                        
+Guidelines:
+- Be direct and concise (2-3 sentences max)
+- Include specific numbers from the data
+- Format numbers with proper units (₹ for currency, commas for thousands)
+- If showing a list, format it clearly
+- Don't add analysis unless asked"""),
+                        ("user", "Question: {user_query}\n\nData:\n{data_summary}\n\nProvide a direct answer:")
+                    ])
+                    
+                    chain = prompt | self.llm_short
+                    response = chain.invoke({
+                        "user_query": user_query,
+                        "data_summary": data_summary
+                    })
+                else:
+                    # No results or summary stats
+                    concise_data = self._format_data_concisely(user_query, data_result)
+                    prompt = ChatPromptTemplate.from_messages([
+                        ("system", "Answer in ONE sentence. No analysis."),
+                        ("user", "{user_query}\n{data}")
+                    ])
+                    chain = prompt | self.llm_short
+                    response = chain.invoke({"user_query": user_query, "data": concise_data})
         
         final_response = response.content
         state["final_response"] = final_response
@@ -548,6 +812,7 @@ Generate a professional business summary of the retail performance.""")
     
     def process_query(self, user_query: str, query_type: str = "qa") -> str:
         logger.info(f"Processing query: {user_query}")
+        start_time = time.time()
         
         # Initialize state
         initial_state = {
@@ -572,7 +837,40 @@ Generate a professional business summary of the retail performance.""")
         # Run the agent graph
         final_state = self.graph.invoke(initial_state)
         
+        execution_time = time.time() - start_time
+        
+        # Log performance metrics if monitor is available
+        if self.performance_monitor:
+            # Estimate token usage (rough approximation)
+            estimated_tokens = len(user_query.split()) * 1.3 + len(final_state.get("final_response", "").split()) * 1.3
+            self.performance_monitor.log_query(
+                query=user_query,
+                execution_time=execution_time,
+                tokens_used=int(estimated_tokens),
+                model=GEMINI_MODEL if self.provider == "Google Gemini" else OPENAI_MODEL
+            )
+        
         return final_state.get("final_response", "I apologize, but I couldn't generate a response.")
+    
+    def get_performance_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get performance and cost metrics"""
+        if not self.performance_monitor:
+            return None
+        
+        metrics = self.performance_monitor.get_cost_summary()
+        
+        # Add cache metrics if available
+        if self.orchestrator:
+            cache_metrics = self.orchestrator.get_metrics()
+            metrics.update(cache_metrics)
+        
+        return metrics
+    
+    def get_alerts(self, max_cost: float = 100.0, max_latency: float = 10.0) -> List[str]:
+        """Check for performance alerts"""
+        if not self.performance_monitor:
+            return []
+        return self.performance_monitor.check_alert_thresholds(max_cost, max_latency)
     
     def get_summary(self) -> str:
         return self.process_query(
@@ -583,4 +881,3 @@ Generate a professional business summary of the retail performance.""")
     def close(self):
         if self.data_processor:
             self.data_processor.close()
-

@@ -35,4 +35,3 @@ AGENT_TIMEOUT = 300
 PAGE_TITLE = "Retail Insights Assistant"
 PAGE_ICON = "📊"
 LAYOUT = "wide"
-
