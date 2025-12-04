@@ -40,6 +40,13 @@ wheels/
 vector_store/
 __MACOSX/
 
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+retail_insights.db.wal
+
 # Logs
 *.log
 
