@@ -101,67 +101,89 @@ class RetailDataProcessor:
                 self.load_data()
             
             # Amazon Sales - simple queries on numeric data
-            amazon_stats = self.conn.execute("""
-                SELECT 
-                    COUNT(*) as total_orders,
-                    COUNT(DISTINCT "Order ID") as unique_orders,
-                    COALESCE(SUM(Amount), 0) as total_revenue,
-                    COALESCE(AVG(Amount), 0) as avg_order_value,
-                    COUNT(DISTINCT Category) as unique_categories,
-                    COUNT(DISTINCT "ship-state") as unique_states
-                FROM amazon_sales
-                WHERE Amount IS NOT NULL
-            """).fetchone()
-            
-            summary['amazon_sales'] = {
-                'total_orders': amazon_stats[0],
-                'unique_orders': amazon_stats[1],
-                'total_revenue': round(float(amazon_stats[2]), 2),
-                'avg_order_value': round(float(amazon_stats[3]), 2),
-                'unique_categories': amazon_stats[4],
-                'unique_states': amazon_stats[5]
-            }
+            try:
+                amazon_stats = self.conn.execute("""
+                    SELECT 
+                        COUNT(*) as total_orders,
+                        COUNT(DISTINCT "Order ID") as unique_orders,
+                        COALESCE(SUM(Amount), 0) as total_revenue,
+                        COALESCE(AVG(Amount), 0) as avg_order_value,
+                        COUNT(DISTINCT Category) as unique_categories,
+                        COUNT(DISTINCT "ship-state") as unique_states
+                    FROM amazon_sales
+                    WHERE Amount IS NOT NULL
+                """).fetchone()
+                
+                if amazon_stats:
+                    summary['amazon_sales'] = {
+                        'total_orders': amazon_stats[0] or 0,
+                        'unique_orders': amazon_stats[1] or 0,
+                        'total_revenue': round(float(amazon_stats[2] or 0), 2),
+                        'avg_order_value': round(float(amazon_stats[3] or 0), 2),
+                        'unique_categories': amazon_stats[4] or 0,
+                        'unique_states': amazon_stats[5] or 0
+                    }
+                else:
+                    summary['amazon_sales'] = {
+                        'total_orders': 0, 'unique_orders': 0, 'total_revenue': 0,
+                        'avg_order_value': 0, 'unique_categories': 0, 'unique_states': 0
+                    }
+            except Exception as e:
+                logger.warning(f"Could not get amazon_sales stats: {e}")
+                summary['amazon_sales'] = {
+                    'total_orders': 0, 'unique_orders': 0, 'total_revenue': 0,
+                    'avg_order_value': 0, 'unique_categories': 0, 'unique_states': 0
+                }
             
             # Top Categories
-            top_categories = self.conn.execute("""
-                SELECT 
-                    Category,
-                    COUNT(*) as order_count,
-                    COALESCE(SUM(Amount), 0) as revenue
-                FROM amazon_sales
-                WHERE Category IS NOT NULL AND Amount IS NOT NULL
-                GROUP BY Category
-                ORDER BY revenue DESC
-                LIMIT 5
-            """).fetchdf()
-            summary['top_categories'] = top_categories.to_dict('records')
+            try:
+                top_categories = self.conn.execute("""
+                    SELECT 
+                        Category,
+                        COUNT(*) as order_count,
+                        COALESCE(SUM(Amount), 0) as revenue
+                    FROM amazon_sales
+                    WHERE Category IS NOT NULL AND Amount IS NOT NULL
+                    GROUP BY Category
+                    ORDER BY revenue DESC
+                    LIMIT 5
+                """).fetchdf()
+                summary['top_categories'] = top_categories.to_dict('records') if len(top_categories) > 0 else []
+            except:
+                summary['top_categories'] = []
             
             # Top States
-            top_states = self.conn.execute("""
-                SELECT 
-                    "ship-state" as state,
-                    COUNT(*) as order_count,
-                    COALESCE(SUM(Amount), 0) as revenue
-                FROM amazon_sales
-                WHERE "ship-state" IS NOT NULL AND Amount IS NOT NULL
-                GROUP BY "ship-state"
-                ORDER BY revenue DESC
-                LIMIT 10
-            """).fetchdf()
-            summary['top_states'] = top_states.to_dict('records')
+            try:
+                top_states = self.conn.execute("""
+                    SELECT 
+                        "ship-state" as state,
+                        COUNT(*) as order_count,
+                        COALESCE(SUM(Amount), 0) as revenue
+                    FROM amazon_sales
+                    WHERE "ship-state" IS NOT NULL AND Amount IS NOT NULL
+                    GROUP BY "ship-state"
+                    ORDER BY revenue DESC
+                    LIMIT 10
+                """).fetchdf()
+                summary['top_states'] = top_states.to_dict('records') if len(top_states) > 0 else []
+            except:
+                summary['top_states'] = []
             
             # Status Distribution
-            status_dist = self.conn.execute("""
-                SELECT 
-                    Status,
-                    COUNT(*) as count,
-                    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM amazon_sales), 2) as percentage
-                FROM amazon_sales
-                WHERE Status IS NOT NULL
-                GROUP BY Status
-                ORDER BY count DESC
-            """).fetchdf()
-            summary['status_distribution'] = status_dist.to_dict('records')
+            try:
+                status_dist = self.conn.execute("""
+                    SELECT 
+                        Status,
+                        COUNT(*) as count,
+                        ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM amazon_sales), 2) as percentage
+                    FROM amazon_sales
+                    WHERE Status IS NOT NULL
+                    GROUP BY Status
+                    ORDER BY count DESC
+                """).fetchdf()
+                summary['status_distribution'] = status_dist.to_dict('records') if len(status_dist) > 0 else []
+            except:
+                summary['status_distribution'] = []
             
             # International Sales
             try:

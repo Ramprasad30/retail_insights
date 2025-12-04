@@ -5,8 +5,9 @@ from pathlib import Path
 def main():
     app_path = Path(__file__).parent / "frontend" / "app.py"
     
-    print("Starting Retail Insights Assistant...")
-    print(f"Loading application from: {app_path}")
+    print("Starting Retail Insights Pro...")
+    print(f"Loading from: {app_path}")
+    print()
     
     try:
         subprocess.run([
@@ -14,7 +15,9 @@ def main():
             "-m",
             "streamlit",
             "run",
-            str(app_path)
+            str(app_path),
+            "--theme.base=dark",
+            "--theme.primaryColor=#667eea"
         ], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error starting application: {e}")
