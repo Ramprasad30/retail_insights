@@ -17,6 +17,11 @@ duckdb>=0.9.2
 pyarrow>=15.0.0
 openpyxl>=3.1.2
 
+# Universal Data Intake Agent Dependencies
+requests>=2.31.0  # For API endpoints
+sqlalchemy>=2.0.0  # For SQL database connections
+pymongo>=4.6.0  # For MongoDB/NoSQL connections
+
 # Vector Store (Optional but included)
 faiss-cpu>=1.7.4
 chromadb>=0.4.22

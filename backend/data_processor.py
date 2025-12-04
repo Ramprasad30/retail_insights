@@ -1,7 +1,7 @@
 import pandas as pd
 import duckdb
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import logging
 from .config import DATA_PATH, DATA_FILES, DUCKDB_PATH
 
@@ -208,6 +208,64 @@ class RetailDataProcessor:
             raise
         
         return summary
+    
+    def load_csv_from_intake_agent(
+        self,
+        csv_path: Union[str, Path],
+        table_name: Optional[str] = None,
+        replace_existing: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Load a CSV file converted by the Universal Data Intake Agent into DuckDB.
+        
+        This method allows the existing pipeline to work with any data source
+        that has been converted to CSV by the Universal Data Intake Agent.
+        
+        Args:
+            csv_path: Path to the CSV file (from Universal Data Intake Agent)
+            table_name: Optional custom table name. If None, uses filename stem
+            replace_existing: Whether to replace existing table if it exists
+        
+        Returns:
+            Dictionary with loading statistics
+        """
+        csv_path = Path(csv_path)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        
+        if table_name is None:
+            # Generate table name from filename
+            table_name = csv_path.stem.replace(' ', '_').replace('-', '_').lower()
+            # Remove common suffixes
+            table_name = table_name.replace('_converted', '').replace('_converted_data', '')
+        
+        # Sanitize table name for SQL
+        table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
+        if table_name[0].isdigit():
+            table_name = 'table_' + table_name
+        
+        try:
+            action = "CREATE OR REPLACE TABLE" if replace_existing else "CREATE TABLE IF NOT EXISTS"
+            
+            logger.info(f"Loading CSV from intake agent: {csv_path} -> table: {table_name}")
+            self.conn.execute(f"""
+                {action} {table_name} AS 
+                SELECT * FROM read_csv_auto('{csv_path}', header=True, ignore_errors=True)
+            """)
+            
+            row_count = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            
+            logger.info(f"Successfully loaded {row_count} rows into table '{table_name}'")
+            
+            return {
+                'status': 'success',
+                'table_name': table_name,
+                'row_count': row_count,
+                'csv_path': str(csv_path)
+            }
+        except Exception as e:
+            logger.error(f"Error loading CSV from intake agent: {e}")
+            raise
     
     def search_data(self, search_term: str, limit: int = 100) -> pd.DataFrame:
         try:
